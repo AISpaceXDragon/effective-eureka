@@ -12,6 +12,10 @@ import os
 import tempfile
 import json
 from pathlib import Path
+import spacy
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
 
 @dataclass
 class Candidate:
@@ -33,8 +37,36 @@ class CandidateMatcher:
         self.chain = initialize_model()
         self.agent = ConversationalAgent(self.chain)
         
-        # Create custom config for pyresparser
-        self._create_pyresparser_config()
+        # Initialize NLTK
+        try:
+            nltk.data.find('tokenizers/punkt')
+        except LookupError:
+            nltk.download('punkt')
+        try:
+            nltk.data.find('corpora/stopwords')
+        except LookupError:
+            nltk.download('stopwords')
+        
+        # Load spaCy model
+        try:
+            self.nlp = spacy.load('en_core_web_sm')
+        except OSError:
+            spacy.cli.download('en_core_web_sm')
+            self.nlp = spacy.load('en_core_web_sm')
+        
+        # Define skill categories first
+        self.skill_categories = {
+            'programming': ['python', 'java', 'javascript', 'typescript', 'c++', 'c#', 'ruby', 'php', 'swift', 'kotlin'],
+            'web': ['html', 'css', 'react', 'angular', 'vue', 'node.js', 'express', 'django', 'flask', 'spring'],
+            'database': ['sql', 'mysql', 'postgresql', 'mongodb', 'redis', 'oracle', 'sqlite'],
+            'ml_ai': ['machine learning', 'deep learning', 'ai', 'artificial intelligence', 'tensorflow', 'pytorch', 'keras', 'scikit-learn', 'nlp', 'cnn', 'rnn', 'lstm', 'transformer', 'bert', 'gpt', 'llm'],
+            'data_science': ['pandas', 'numpy', 'matplotlib', 'seaborn', 'jupyter', 'r', 'spark', 'hadoop', 'data analysis', 'data visualization'],
+            'devops': ['docker', 'kubernetes', 'jenkins', 'git', 'ci/cd', 'aws', 'azure', 'gcp', 'terraform', 'github actions', 'bitbucket'],
+            'mobile': ['android', 'ios', 'react native', 'flutter', 'xamarin'],
+            'cloud': ['aws', 'azure', 'gcp', 'cloud', 'serverless', 'lambda', 's3', 'ec2'],
+            'security': ['security', 'cybersecurity', 'penetration testing', 'ethical hacking', 'network security'],
+            'blockchain': ['blockchain', 'ethereum', 'solidity', 'web3', 'smart contracts']
+        }
         
         # Education level mapping
         self.education_levels = {
@@ -49,35 +81,17 @@ class CandidateMatcher:
             'diploma': 2,
             'high school': 1
         }
-
-        # Skill categories for better matching
-        self.skill_categories = {
-            'programming': ['python', 'java', 'javascript', 'typescript', 'c++', 'c#', 'ruby', 'php', 'swift', 'kotlin'],
-            'web': ['html', 'css', 'react', 'angular', 'vue', 'node.js', 'express', 'django', 'flask', 'spring'],
-            'database': ['sql', 'mysql', 'postgresql', 'mongodb', 'redis', 'oracle', 'sqlite'],
-            'ml_ai': ['machine learning', 'deep learning', 'ai', 'artificial intelligence', 'tensorflow', 'pytorch', 'keras', 'scikit-learn'],
-            'data_science': ['pandas', 'numpy', 'matplotlib', 'seaborn', 'jupyter', 'r', 'spark', 'hadoop'],
-            'devops': ['docker', 'kubernetes', 'jenkins', 'git', 'ci/cd', 'aws', 'azure', 'gcp', 'terraform'],
-            'mobile': ['android', 'ios', 'react native', 'flutter', 'xamarin'],
-            'cloud': ['aws', 'azure', 'gcp', 'cloud', 'serverless', 'lambda', 's3', 'ec2'],
-            'security': ['security', 'cybersecurity', 'penetration testing', 'ethical hacking', 'network security'],
-            'blockchain': ['blockchain', 'ethereum', 'solidity', 'web3', 'smart contracts']
-        }
+        
+        # Create custom config for pyresparser after skill_categories is defined
+        self._create_pyresparser_config()
 
     def _create_pyresparser_config(self):
         """Create custom config file for pyresparser"""
         config = {
-            "skills": {
-                "programming": ["python", "java", "javascript", "typescript", "c++", "c#", "ruby", "php", "swift", "kotlin"],
-                "web": ["html", "css", "react", "angular", "vue", "node.js", "express", "django", "flask", "spring"],
-                "database": ["sql", "mysql", "postgresql", "mongodb", "redis", "oracle", "sqlite"],
-                "ml_ai": ["machine learning", "deep learning", "ai", "artificial intelligence", "tensorflow", "pytorch", "keras", "scikit-learn"],
-                "data_science": ["pandas", "numpy", "matplotlib", "seaborn", "jupyter", "r", "spark", "hadoop"],
-                "devops": ["docker", "kubernetes", "jenkins", "git", "ci/cd", "aws", "azure", "gcp", "terraform"],
-                "mobile": ["android", "ios", "react native", "flutter", "xamarin"],
-                "cloud": ["aws", "azure", "gcp", "cloud", "serverless", "lambda", "s3", "ec2"],
-                "security": ["security", "cybersecurity", "penetration testing", "ethical hacking", "network security"],
-                "blockchain": ["blockchain", "ethereum", "solidity", "web3", "smart contracts"]
+            "skills": self.skill_categories,
+            "education": {
+                "degree": ["bachelor", "master", "phd", "doctorate", "diploma"],
+                "major": ["computer science", "engineering", "information technology", "software engineering"]
             }
         }
         
@@ -90,6 +104,24 @@ class CandidateMatcher:
         with open(config_file, 'w') as f:
             json.dump(config, f, indent=4)
 
+    def _normalize_skill(self, skill: str) -> str:
+        """Normalize skill text for better matching"""
+        # Convert to lowercase
+        skill = skill.lower()
+        
+        # Remove common prefixes/suffixes
+        prefixes = ['proficient in', 'expert in', 'skilled in', 'experience with', 'knowledge of']
+        for prefix in prefixes:
+            if skill.startswith(prefix):
+                skill = skill[len(prefix):].strip()
+        
+        # Remove special characters
+        skill = re.sub(r'[^\w\s]', '', skill)
+        
+        return skill.strip()
+
+
+    
     def _calculate_experience_years(self, experience_text: str) -> float:
         """Calculate total years of experience from experience text"""
         total_years = 0.0
@@ -100,16 +132,24 @@ class CandidateMatcher:
             duration_match = re.search(r'Duration:\s*([^-]+)\s*-\s*([^,]+)', entry)
             if duration_match:
                 try:
-                    start_date = dateutil.parser.parse(duration_match.group(1).strip())
-                    end_date = dateutil.parser.parse(duration_match.group(2).strip())
-                    
+                    start_str = duration_match.group(1).strip()
+                    end_str = duration_match.group(2).strip()
+
+                    start_date = dateutil.parser.parse(start_str, dayfirst=False)
+                    end_date = dateutil.parser.parse(end_str, dayfirst=False)
+
+                    # Ensure end_date is not before start_date
+                    if end_date < start_date:
+                        start_date, end_date = end_date, start_date
+
                     # Calculate years between dates
                     years = (end_date - start_date).days / 365.25
-                    if years > 0:  # Only add positive durations
+                    if years > 0:
                         total_years += years
-                except:
+                except Exception as e:
+                    print(f"Date parse error in entry: {entry} => {e}")
                     continue
-        
+
         return round(total_years, 1)
 
     def _get_highest_education(self, education_text: str) -> str:
@@ -131,43 +171,58 @@ class CandidateMatcher:
         if not jd_skills or not candidate_skills:
             return 0.0, []
         
-        # Convert to lowercase for better matching
-        jd_skills_lower = [skill.lower() for skill in jd_skills]
-        candidate_skills_lower = [skill.lower() for skill in candidate_skills]
+        # Normalize skills
+        jd_skills_normalized = [self._normalize_skill(skill) for skill in jd_skills]
+        candidate_skills_normalized = [self._normalize_skill(skill) for skill in candidate_skills]
         
-        # Find matching skills using category-based matching
-        matching_skills = []
-        for jd_skill in jd_skills_lower:
-            # Check direct match
-            if jd_skill in candidate_skills_lower:
-                matching_skills.append(jd_skill)
-                continue
-            
-            # Check category-based match
+        # Find matching skills using multiple methods
+        matching_skills = set()
+        
+        # 1. Direct match
+        for jd_skill in jd_skills_normalized:
+            for candidate_skill in candidate_skills_normalized:
+                if jd_skill in candidate_skill or candidate_skill in jd_skill:
+                    matching_skills.add(candidate_skill)
+        
+        # 2. Category-based match
+        for jd_skill in jd_skills_normalized:
             for category, skills in self.skill_categories.items():
                 if jd_skill in skills:
-                    # If JD skill is in a category, check if candidate has any skill from that category
-                    for candidate_skill in candidate_skills_lower:
+                    for candidate_skill in candidate_skills_normalized:
                         if candidate_skill in skills:
-                            matching_skills.append(candidate_skill)
-                            break
-                    break
+                            matching_skills.add(candidate_skill)
         
-        # Calculate match percentage
-        match_percentage = (len(matching_skills) / len(jd_skills)) * 100
+        # 3. Semantic similarity for remaining skills
+        remaining_jd_skills = [skill for skill in jd_skills_normalized if skill not in matching_skills]
+        remaining_candidate_skills = [skill for skill in candidate_skills_normalized if skill not in matching_skills]
         
-        return match_percentage, matching_skills
+        if remaining_jd_skills and remaining_candidate_skills:
+            jd_embeddings = self.model.encode(remaining_jd_skills)
+            candidate_embeddings = self.model.encode(remaining_candidate_skills)
+            
+            for i, jd_embedding in enumerate(jd_embeddings):
+                for j, candidate_embedding in enumerate(candidate_embeddings):
+                    similarity = np.dot(jd_embedding, candidate_embedding) / (
+                        np.linalg.norm(jd_embedding) * np.linalg.norm(candidate_embedding)
+                    )
+                    if similarity > 0.5:  # Threshold for semantic similarity
+                        matching_skills.add(remaining_candidate_skills[j])
+        
+        # Calculate match percentage (capped at 100%)
+        match_percentage = min((len(matching_skills) / len(jd_skills)) * 100, 100.0)
+        
+        return match_percentage, list(matching_skills)
 
     def _calculate_experience_match_score(self, required_years: int, candidate_years: float) -> float:
         """Calculate experience match score"""
         if required_years == 0:
             return 100.0
         
-        # Calculate match percentage based on experience
+        # Calculate match percentage based on experience (capped at 100%)
         if candidate_years >= required_years:
             return 100.0
         else:
-            return (candidate_years / required_years) * 100
+            return min((candidate_years / required_years) * 100, 100.0)
 
     def _extract_candidate_info(self, resume_text: str, file_path: str = None) -> Candidate:
         """Extract structured information from resume using pyresparser"""
@@ -231,7 +286,7 @@ class CandidateMatcher:
             
         except Exception as e:
             st.error(f"Error parsing resume with pyresparser: {str(e)}")
-            # Fallback to previous method if pyresparser fails
+            # Fallback to LLM-based parsing
             return self._extract_candidate_info_fallback(resume_text)
 
     def _extract_candidate_info_fallback(self, resume_text: str) -> Candidate:
@@ -378,9 +433,12 @@ IMPORTANT:
 
     def _calculate_similarity(self, jd_embedding: np.ndarray, candidate_embedding: np.ndarray) -> float:
         """Calculate cosine similarity between embeddings"""
-        return np.dot(jd_embedding, candidate_embedding) / (
+        similarity = np.dot(jd_embedding, candidate_embedding) / (
             np.linalg.norm(jd_embedding) * np.linalg.norm(candidate_embedding)
         )
+        # Normalize similarity to 0-1 range
+        similarity = (similarity + 1) / 2  # Convert from [-1,1] to [0,1]
+        return min(max(similarity * 100, 0.0), 100.0)  # Convert to percentage and cap
 
     def match_candidates(self, jd_text: str, jd_skills: List[str], required_experience: int, candidates: List[str]) -> List[Candidate]:
         """Match candidates against job description"""
@@ -397,22 +455,23 @@ IMPORTANT:
                 # Create candidate embedding
                 candidate_embedding = self._create_candidate_embedding(candidate)
                 
-                # Calculate overall similarity
+                # Calculate overall similarity (0-100%)
                 similarity_score = self._calculate_similarity(jd_embedding, candidate_embedding)
                 
-                # Calculate skill match
+                # Calculate skill match (0-100%)
                 skill_match, matching_skills = self._calculate_skill_match_score(jd_skills, candidate.skills)
-                candidate.skill_match_percentage = skill_match
+                candidate.skill_match_percentage = min(skill_match, 100.0)
                 
-                # Calculate experience match
+                # Calculate experience match (0-100%)
                 experience_match = self._calculate_experience_match_score(required_experience, candidate.total_experience_years)
-                candidate.experience_match_score = experience_match
+                candidate.experience_match_score = min(experience_match, 100.0)
                 
-                # Combine scores (40% similarity, 40% skill match, 20% experience match)
-                candidate.match_score = (
-                    similarity_score * 0.4 +
-                    skill_match * 0.4 +
-                    experience_match * 0.2
+                # Combine scores with weights (all scores are already 0-100%)
+                candidate.match_score = min(
+                    (similarity_score * 0.4 +
+                     candidate.skill_match_percentage * 0.4 +
+                     candidate.experience_match_score * 0.2),
+                    100.0  # Cap at 100%
                 )
                 
                 processed_candidates.append(candidate)

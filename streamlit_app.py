@@ -242,7 +242,7 @@ if st.session_state['job_description']:
                         st.session_state['candidate_matcher']._create_jd_embedding(st.session_state['job_description']),
                         candidate_embedding
                     )
-                    
+                    print(similarity_score)
                     # Calculate skill match
                     skill_match, matching_skills = st.session_state['candidate_matcher']._calculate_skill_match_score(jd_skills, candidate.skills)
                     candidate.skill_match_percentage = skill_match
@@ -250,13 +250,13 @@ if st.session_state['job_description']:
                     # Calculate experience match
                     experience_match = st.session_state['candidate_matcher']._calculate_experience_match_score(required_experience, candidate.total_experience_years)
                     candidate.experience_match_score = experience_match
-                    
+                    print(similarity_score,skill_match,experience_match)
                     # Combine scores (40% similarity, 40% skill match, 20% experience match)
                     candidate.match_score = (
                         similarity_score * 0.4 +
                         skill_match * 0.4 +
                         experience_match * 0.2
-                    ) * 100  # Convert to percentage
+                    )   # Convert to percentage
 
                 # Sort candidates by match score
                 st.session_state['matched_candidates'] = sorted(matched_candidates, key=lambda x: x.match_score, reverse=True)
