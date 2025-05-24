@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional
 from Components.para_agent import initialize_model, ConversationalAgent
+import json
 
 @dataclass
 class JDInput:
@@ -27,12 +28,13 @@ class JDOutput:
 
 class JDGenerator:
     def __init__(self):
-        self.chain = initialize_model([])  # Initialize without documents
+        self.chain = initialize_model()  # Initialize without documents
         self.agent = ConversationalAgent(self.chain)
 
     def _create_prompt(self, jd_input: JDInput) -> str:
         """Create a structured prompt for the LLM"""
-        prompt = f"""Generate a detailed job description for a {jd_input.role} position.
+        prompt = f"""You are an expert HR professional tasked with creating a detailed job description.
+Please create a comprehensive job description for a {jd_input.role} position with the following requirements:
 
 Job Details:
 - Experience Required: {jd_input.experience_years} years
@@ -51,14 +53,16 @@ Job Details:
             prompt += f"- Additional Requirements: {jd_input.additional_requirements}\n"
 
         prompt += """
-Please generate a comprehensive job description with the following sections:
-1. Job Title and Overview
-2. Key Responsibilities (list 5-7 points)
-3. Required Skills and Qualifications
-4. Preferred Qualifications
-5. Company Benefits
+Create a detailed job description that includes:
 
-Format the output as a JSON object with the following structure:
+1. A clear and engaging job title
+2. A comprehensive overview of the role and its importance
+3. 5-7 specific key responsibilities
+4. Required skills and qualifications
+5. Preferred qualifications that would make a candidate stand out
+6. Attractive company benefits and perks
+
+Format your response as a JSON object with the following structure:
 {
     "job_title": "string",
     "overview": "string",
@@ -68,15 +72,27 @@ Format the output as a JSON object with the following structure:
     "benefits": ["string"],
     "additional_info": "string"
 }
+
+IMPORTANT:
+- Be specific and detailed in each section
+- Use clear, professional language
+- Ensure all sections are complete and well-structured
+- Your response must be a valid JSON object
+- Do not include any text before or after the JSON object
 """
         return prompt
 
     def _parse_llm_response(self, response: str) -> JDOutput:
         """Parse the LLM response into structured format"""
         try:
-            # The response should be a JSON string
-            import json
-            data = json.loads(response)
+            # Try to find JSON in the response
+            start_idx = response.find('{')
+            end_idx = response.rfind('}') + 1
+            if start_idx >= 0 and end_idx > start_idx:
+                json_str = response[start_idx:end_idx]
+                data = json.loads(json_str)
+            else:
+                raise ValueError("No JSON object found in response")
             
             return JDOutput(
                 job_title=data.get("job_title", ""),
@@ -114,16 +130,16 @@ Format the output as a JSON object with the following structure:
 {jd_output.overview}
 
 ## Key Responsibilities
-{chr(10).join(f"- {resp}" for resp in jd_output.key_responsibilities)}
+{chr(10).join(f"• {resp}" for resp in jd_output.key_responsibilities)}
 
 ## Required Skills
-{chr(10).join(f"- {skill}" for skill in jd_output.required_skills)}
+{chr(10).join(f"• {skill}" for skill in jd_output.required_skills)}
 
 ## Preferred Qualifications
-{chr(10).join(f"- {qual}" for qual in jd_output.preferred_qualifications)}
+{chr(10).join(f"• {qual}" for qual in jd_output.preferred_qualifications)}
 
 ## Benefits
-{chr(10).join(f"- {benefit}" for benefit in jd_output.benefits)}
+{chr(10).join(f"• {benefit}" for benefit in jd_output.benefits)}
 """
         if jd_output.additional_info:
             formatted_text += f"\n## Additional Information\n{jd_output.additional_info}"
