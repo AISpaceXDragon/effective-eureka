@@ -14,6 +14,7 @@ import atexit
 import tempfile
 import hashlib
 from pathlib import Path
+import nltk
 
 # __import__('pysqlite3')
 # import sys
@@ -188,6 +189,7 @@ if st.session_state['job_description']:
         if st.button("Process Resumes and Find Matches", type="primary"):
             with st.spinner("Processing resumes and finding matches..."):
                 resume_texts = []
+                resume_paths = []
                 for resume in st.session_state['resumes']:
                     file_path = save_uploaded_file(resume, "dataset")
                     if file_path:
@@ -195,23 +197,71 @@ if st.session_state['job_description']:
                         if documents:
                             resume_text = "\n".join(doc.page_content for doc in documents)
                             resume_texts.append(resume_text)
+                            resume_paths.append(file_path)
 
-                # Extract skills from job description
+                # Extract skills and required experience from job description
                 jd_skills = []
+                required_experience = 0
+                
                 if isinstance(st.session_state['job_description'], dict):
                     jd_skills = st.session_state['job_description'].get('required_skills', [])
+                    required_experience = st.session_state['job_description'].get('experience_years', 0)
                 else:
-                    jd_skills = extract_skills_from_jd(st.session_state['job_description'])
+                    # Extract skills and experience from text
+                    chain = initialize_model()
+                    agent = ConversationalAgent(chain)
+                    
+                    # Extract skills
+                    skills_response, _ = agent.ask("Extract all required skills from this job description. Return only the skills, one per line.")
+                    jd_skills = [skill.strip() for skill in skills_response.split('\n') if skill.strip()]
+                    
+                    # Extract required experience
+                    exp_response, _ = agent.ask("Extract the required years of experience from this job description. Return only the number.")
+                    try:
+                        required_experience = int(exp_response.strip())
+                    except:
+                        required_experience = 0
 
                 # Match candidates
-                matched_candidates = st.session_state['candidate_matcher'].match_candidates(
-                    st.session_state['job_description'],
-                    jd_skills,
-                    resume_texts
-                )
-                st.session_state['matched_candidates'] = matched_candidates
+                matched_candidates = []
+                for i, (resume_text, file_path) in enumerate(zip(resume_texts, resume_paths)):
+                    try:
+                        candidate = st.session_state['candidate_matcher']._extract_candidate_info(resume_text, file_path)
+                        matched_candidates.append(candidate)
+                    except Exception as e:
+                        st.error(f"Error processing resume {i+1}: {str(e)}")
+                        continue
 
-# Display matched candidates
+                # Calculate match scores
+                for candidate in matched_candidates:
+                    # Create candidate embedding
+                    candidate_embedding = st.session_state['candidate_matcher']._create_candidate_embedding(candidate)
+                    
+                    # Calculate overall similarity
+                    similarity_score = st.session_state['candidate_matcher']._calculate_similarity(
+                        st.session_state['candidate_matcher']._create_jd_embedding(st.session_state['job_description']),
+                        candidate_embedding
+                    )
+                    
+                    # Calculate skill match
+                    skill_match, matching_skills = st.session_state['candidate_matcher']._calculate_skill_match_score(jd_skills, candidate.skills)
+                    candidate.skill_match_percentage = skill_match
+                    
+                    # Calculate experience match
+                    experience_match = st.session_state['candidate_matcher']._calculate_experience_match_score(required_experience, candidate.total_experience_years)
+                    candidate.experience_match_score = experience_match
+                    
+                    # Combine scores (40% similarity, 40% skill match, 20% experience match)
+                    candidate.match_score = (
+                        similarity_score * 0.4 +
+                        skill_match * 0.4 +
+                        experience_match * 0.2
+                    ) * 100  # Convert to percentage
+
+                # Sort candidates by match score
+                st.session_state['matched_candidates'] = sorted(matched_candidates, key=lambda x: x.match_score, reverse=True)
+
+# Display matched candidates with enhanced information
 if st.session_state['matched_candidates']:
     st.header('Candidate Matches')
     st.info("Candidates are ranked by their match score with the job description.")
@@ -219,6 +269,15 @@ if st.session_state['matched_candidates']:
     for i, candidate in enumerate(st.session_state['matched_candidates'], 1):
         with st.expander(f"Rank #{i} - {candidate.name} (Match Score: {candidate.match_score:.1f}%)"):
             st.markdown(st.session_state['candidate_matcher'].format_candidate_display(candidate))
+            
+            # Add a progress bar for each match component
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Skill Match", f"{candidate.skill_match_percentage:.1f}%")
+            with col2:
+                st.metric("Experience Match", f"{candidate.experience_match_score:.1f}%")
+            with col3:
+                st.metric("Overall Match", f"{candidate.match_score:.1f}%")
 
 # Cleanup function
 def cleanup_temp_files():
@@ -409,4 +468,10 @@ agent=None
             
 #     except Exception as e:
 #         st.error(f"Error during cleanup: {e}")
+
+nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger')
+nltk.download('universal_tagset')
+nltk.download('maxent_ne_chunker')
+nltk.download('words')
 

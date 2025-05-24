@@ -1,29 +1,241 @@
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from Components.para_agent import initialize_model, ConversationalAgent
 import streamlit as st
 import re
+from datetime import datetime
+import dateutil.parser
+from pyresparser import ResumeParser
+import os
+import tempfile
+import json
+from pathlib import Path
 
 @dataclass
 class Candidate:
     name: str
     skills: List[str]
     experience: str
-    education: str
+    total_experience_years: float
+    highest_education: str
     contact: str
     raw_text: str
     match_score: float = 0.0
+    skill_match_percentage: float = 0.0
+    experience_match_score: float = 0.0
+    education_match_score: float = 0.0
 
 class CandidateMatcher:
     def __init__(self):
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
         self.chain = initialize_model()
         self.agent = ConversationalAgent(self.chain)
+        
+        # Create custom config for pyresparser
+        self._create_pyresparser_config()
+        
+        # Education level mapping
+        self.education_levels = {
+            'phd': 5,
+            'doctorate': 5,
+            'master': 4,
+            'm.tech': 4,
+            'm.eng': 4,
+            'bachelor': 3,
+            'b.tech': 3,
+            'b.eng': 3,
+            'diploma': 2,
+            'high school': 1
+        }
 
-    def _extract_candidate_info(self, resume_text: str) -> Candidate:
-        """Extract structured information from resume text"""
+        # Skill categories for better matching
+        self.skill_categories = {
+            'programming': ['python', 'java', 'javascript', 'typescript', 'c++', 'c#', 'ruby', 'php', 'swift', 'kotlin'],
+            'web': ['html', 'css', 'react', 'angular', 'vue', 'node.js', 'express', 'django', 'flask', 'spring'],
+            'database': ['sql', 'mysql', 'postgresql', 'mongodb', 'redis', 'oracle', 'sqlite'],
+            'ml_ai': ['machine learning', 'deep learning', 'ai', 'artificial intelligence', 'tensorflow', 'pytorch', 'keras', 'scikit-learn'],
+            'data_science': ['pandas', 'numpy', 'matplotlib', 'seaborn', 'jupyter', 'r', 'spark', 'hadoop'],
+            'devops': ['docker', 'kubernetes', 'jenkins', 'git', 'ci/cd', 'aws', 'azure', 'gcp', 'terraform'],
+            'mobile': ['android', 'ios', 'react native', 'flutter', 'xamarin'],
+            'cloud': ['aws', 'azure', 'gcp', 'cloud', 'serverless', 'lambda', 's3', 'ec2'],
+            'security': ['security', 'cybersecurity', 'penetration testing', 'ethical hacking', 'network security'],
+            'blockchain': ['blockchain', 'ethereum', 'solidity', 'web3', 'smart contracts']
+        }
+
+    def _create_pyresparser_config(self):
+        """Create custom config file for pyresparser"""
+        config = {
+            "skills": {
+                "programming": ["python", "java", "javascript", "typescript", "c++", "c#", "ruby", "php", "swift", "kotlin"],
+                "web": ["html", "css", "react", "angular", "vue", "node.js", "express", "django", "flask", "spring"],
+                "database": ["sql", "mysql", "postgresql", "mongodb", "redis", "oracle", "sqlite"],
+                "ml_ai": ["machine learning", "deep learning", "ai", "artificial intelligence", "tensorflow", "pytorch", "keras", "scikit-learn"],
+                "data_science": ["pandas", "numpy", "matplotlib", "seaborn", "jupyter", "r", "spark", "hadoop"],
+                "devops": ["docker", "kubernetes", "jenkins", "git", "ci/cd", "aws", "azure", "gcp", "terraform"],
+                "mobile": ["android", "ios", "react native", "flutter", "xamarin"],
+                "cloud": ["aws", "azure", "gcp", "cloud", "serverless", "lambda", "s3", "ec2"],
+                "security": ["security", "cybersecurity", "penetration testing", "ethical hacking", "network security"],
+                "blockchain": ["blockchain", "ethereum", "solidity", "web3", "smart contracts"]
+            }
+        }
+        
+        # Create config directory if it doesn't exist
+        config_dir = Path.home() / '.pyresparser'
+        config_dir.mkdir(exist_ok=True)
+        
+        # Write config file
+        config_file = config_dir / 'config.cfg'
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=4)
+
+    def _calculate_experience_years(self, experience_text: str) -> float:
+        """Calculate total years of experience from experience text"""
+        total_years = 0.0
+        experience_entries = experience_text.split('\n')
+        
+        for entry in experience_entries:
+            # Extract duration using regex
+            duration_match = re.search(r'Duration:\s*([^-]+)\s*-\s*([^,]+)', entry)
+            if duration_match:
+                try:
+                    start_date = dateutil.parser.parse(duration_match.group(1).strip())
+                    end_date = dateutil.parser.parse(duration_match.group(2).strip())
+                    
+                    # Calculate years between dates
+                    years = (end_date - start_date).days / 365.25
+                    if years > 0:  # Only add positive durations
+                        total_years += years
+                except:
+                    continue
+        
+        return round(total_years, 1)
+
+    def _get_highest_education(self, education_text: str) -> str:
+        """Determine the highest level of education"""
+        highest_level = 0
+        highest_degree = ""
+        
+        for line in education_text.split('\n'):
+            degree = line.lower()
+            for level, score in self.education_levels.items():
+                if level in degree and score > highest_level:
+                    highest_level = score
+                    highest_degree = line.strip()
+        
+        return highest_degree if highest_degree else "Education level not found"
+
+    def _calculate_skill_match_score(self, jd_skills: List[str], candidate_skills: List[str]) -> Tuple[float, List[str]]:
+        """Calculate detailed skill match score and matching skills"""
+        if not jd_skills or not candidate_skills:
+            return 0.0, []
+        
+        # Convert to lowercase for better matching
+        jd_skills_lower = [skill.lower() for skill in jd_skills]
+        candidate_skills_lower = [skill.lower() for skill in candidate_skills]
+        
+        # Find matching skills using category-based matching
+        matching_skills = []
+        for jd_skill in jd_skills_lower:
+            # Check direct match
+            if jd_skill in candidate_skills_lower:
+                matching_skills.append(jd_skill)
+                continue
+            
+            # Check category-based match
+            for category, skills in self.skill_categories.items():
+                if jd_skill in skills:
+                    # If JD skill is in a category, check if candidate has any skill from that category
+                    for candidate_skill in candidate_skills_lower:
+                        if candidate_skill in skills:
+                            matching_skills.append(candidate_skill)
+                            break
+                    break
+        
+        # Calculate match percentage
+        match_percentage = (len(matching_skills) / len(jd_skills)) * 100
+        
+        return match_percentage, matching_skills
+
+    def _calculate_experience_match_score(self, required_years: int, candidate_years: float) -> float:
+        """Calculate experience match score"""
+        if required_years == 0:
+            return 100.0
+        
+        # Calculate match percentage based on experience
+        if candidate_years >= required_years:
+            return 100.0
+        else:
+            return (candidate_years / required_years) * 100
+
+    def _extract_candidate_info(self, resume_text: str, file_path: str = None) -> Candidate:
+        """Extract structured information from resume using pyresparser"""
+        try:
+            # Save resume text to a temporary file if file_path is not provided
+            if not file_path:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as temp_file:
+                    temp_file.write(resume_text)
+                    file_path = temp_file.name
+
+            # Parse resume using pyresparser
+            data = ResumeParser(file_path).get_extracted_data()
+            
+            # Extract information
+            name = data.get('name', 'Name not found')
+            skills = data.get('skills', [])
+            experience = data.get('experience', [])
+            education = data.get('education', [])
+            
+            # Format experience
+            formatted_experience = []
+            for exp in experience:
+                if isinstance(exp, dict):
+                    company = exp.get('company', '')
+                    duration = exp.get('duration', '')
+                    role = exp.get('title', '')
+                    formatted_experience.append(f"Company: {company}, Duration: {duration}, Role: {role}")
+                else:
+                    formatted_experience.append(str(exp))
+            
+            # Calculate total experience
+            total_experience = self._calculate_experience_years('\n'.join(formatted_experience))
+            
+            # Get highest education
+            highest_education = self._get_highest_education('\n'.join(education))
+            
+            # Format contact information
+            contact_info = []
+            if data.get('email'):
+                contact_info.append(f"Email: {data['email']}")
+            if data.get('mobile_number'):
+                contact_info.append(f"Phone: {data['mobile_number']}")
+            if data.get('linkedin'):
+                contact_info.append(f"LinkedIn: {data['linkedin']}")
+            
+            contact = '\n'.join(contact_info) if contact_info else "Contact information not found"
+            
+            # Clean up temporary file if created
+            if not file_path.endswith('.pdf'):
+                os.unlink(file_path)
+            
+            return Candidate(
+                name=name,
+                skills=skills,
+                experience='\n'.join(formatted_experience),
+                total_experience_years=total_experience,
+                highest_education=highest_education,
+                contact=contact,
+                raw_text=resume_text
+            )
+            
+        except Exception as e:
+            st.error(f"Error parsing resume with pyresparser: {str(e)}")
+            # Fallback to previous method if pyresparser fails
+            return self._extract_candidate_info_fallback(resume_text)
+
+    def _extract_candidate_info_fallback(self, resume_text: str) -> Candidate:
+        """Fallback method using LLM if pyresparser fails"""
         # First, try to extract name and contact using regex patterns
         name = self._extract_name(resume_text)
         contact = self._extract_contact(resume_text)
@@ -36,7 +248,7 @@ RESUME TEXT:
 
 Please extract:
 1. List all technical skills and programming languages mentioned
-2. List all work experience with company names and durations
+2. List all work experience with company names and durations (include exact dates)
 3. List all educational qualifications with degrees and institutions
 
 Format your response as:
@@ -46,14 +258,18 @@ SKILLS:
 ...
 
 EXPERIENCE:
-- Company: [name], Duration: [period], Role: [title]
+- Company: [name], Duration: [start date] - [end date], Role: [title]
 ...
 
 EDUCATION:
 - Degree: [name], Institution: [name], Year: [year]
 ...
 
-IMPORTANT: Only list information that is explicitly mentioned in the resume. Do not make assumptions or add example information."""
+IMPORTANT: 
+- Only list information that is explicitly mentioned in the resume
+- For experience, include exact dates in format: Month Year - Month Year
+- For education, include the year of completion
+- Do not make assumptions or add example information"""
 
         response, _ = self.agent.ask(prompt)
         
@@ -82,11 +298,16 @@ IMPORTANT: Only list information that is explicitly mentioned in the resume. Do 
                 elif current_section == 'education':
                     education.append(line[2:].strip())
 
+        # Calculate total experience and highest education
+        total_experience = self._calculate_experience_years('\n'.join(experience))
+        highest_education = self._get_highest_education('\n'.join(education))
+
         return Candidate(
             name=name,
             skills=skills,
             experience='\n'.join(experience),
-            education='\n'.join(education),
+            total_experience_years=total_experience,
+            highest_education=highest_education,
             contact=contact,
             raw_text=resume_text
         )
@@ -151,7 +372,7 @@ IMPORTANT: Only list information that is explicitly mentioned in the resume. Do 
         candidate_text = f"""
         Skills: {', '.join(candidate.skills)}
         Experience: {candidate.experience}
-        Education: {candidate.education}
+        Education: {candidate.highest_education}
         """
         return self.model.encode(candidate_text)
 
@@ -161,24 +382,7 @@ IMPORTANT: Only list information that is explicitly mentioned in the resume. Do 
             np.linalg.norm(jd_embedding) * np.linalg.norm(candidate_embedding)
         )
 
-    def _calculate_skill_match(self, jd_skills: List[str], candidate_skills: List[str]) -> float:
-        """Calculate skill match percentage"""
-        if not jd_skills or not candidate_skills:
-            return 0.0
-        
-        # Convert to lowercase for better matching
-        jd_skills_lower = [skill.lower() for skill in jd_skills]
-        candidate_skills_lower = [skill.lower() for skill in candidate_skills]
-        
-        # Count matching skills
-        matches = sum(1 for skill in jd_skills_lower if any(
-            skill in candidate_skill or candidate_skill in skill
-            for candidate_skill in candidate_skills_lower
-        ))
-        
-        return (matches / len(jd_skills)) * 100
-
-    def match_candidates(self, jd_text: str, jd_skills: List[str], candidates: List[str]) -> List[Candidate]:
+    def match_candidates(self, jd_text: str, jd_skills: List[str], required_experience: int, candidates: List[str]) -> List[Candidate]:
         """Match candidates against job description"""
         # Create JD embedding
         jd_embedding = self._create_jd_embedding(jd_text)
@@ -197,10 +401,20 @@ IMPORTANT: Only list information that is explicitly mentioned in the resume. Do 
                 similarity_score = self._calculate_similarity(jd_embedding, candidate_embedding)
                 
                 # Calculate skill match
-                skill_match = self._calculate_skill_match(jd_skills, candidate.skills)
+                skill_match, matching_skills = self._calculate_skill_match_score(jd_skills, candidate.skills)
+                candidate.skill_match_percentage = skill_match
                 
-                # Combine scores (70% similarity, 30% skill match)
-                candidate.match_score = (similarity_score * 0.7) + (skill_match * 0.3)
+                # Calculate experience match
+                experience_match = self._calculate_experience_match_score(required_experience, candidate.total_experience_years)
+                candidate.experience_match_score = experience_match
+                
+                # Combine scores (40% similarity, 40% skill match, 20% experience match)
+                candidate.match_score = (
+                    similarity_score * 0.4 +
+                    skill_match * 0.4 +
+                    experience_match * 0.2
+                )
+                
                 processed_candidates.append(candidate)
             except Exception as e:
                 st.error(f"Error processing resume: {str(e)}")
@@ -218,6 +432,11 @@ IMPORTANT: Only list information that is explicitly mentioned in the resume. Do 
 ### Contact Information
 {candidate.contact}
 
+### Skills Match
+**Skill Match Percentage:** {candidate.skill_match_percentage:.1f}%
+**Total Experience:** {candidate.total_experience_years} years
+**Highest Education:** {candidate.highest_education}
+
 ### Skills
 {chr(10).join(f"• {skill}" for skill in candidate.skills)}
 
@@ -225,5 +444,5 @@ IMPORTANT: Only list information that is explicitly mentioned in the resume. Do 
 {candidate.experience}
 
 ### Education
-{candidate.education}
+{candidate.highest_education}
 """ 
