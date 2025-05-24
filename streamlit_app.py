@@ -1,8 +1,9 @@
 import streamlit as st
 import os
+import json
 from Components.para_utility import load_pdfs_from_file, load_pdfs_from_folder, save_uploaded_file, save_to_user_storage,create_user_storage, get_embedding_path
 from Components.para_agent import initialize_model, ConversationalAgent,process_file,demo_file_load
-# from whisper import load_model  # Importing Whisper AI
+from Components.jd_generator import JDGenerator, JDInput, JDOutput
 from transformers import pipeline  # Ensure transformers is updated
 from Components.video_utility import save_uploaded_video, process_video_voice
 import shutil
@@ -18,8 +19,199 @@ from pathlib import Path
 import sqlite3
 
 # Page title
-st.set_page_config(page_title='Ema Chatbot', page_icon='🤖')
-st.title('🤖 Ema chatBot')
+st.set_page_config(page_title='Resume Parser', page_icon='📄')
+st.title('📄 Resume Parser & Job Matcher')
+
+# Initialize session states
+if 'job_description' not in st.session_state:
+    st.session_state['job_description'] = None
+if 'generated_jd' not in st.session_state:
+    st.session_state['generated_jd'] = None
+if 'jd_output' not in st.session_state:
+    st.session_state['jd_output'] = None
+if 'resumes' not in st.session_state:
+    st.session_state['resumes'] = []
+if 'parsed_resumes' not in st.session_state:
+    st.session_state['parsed_resumes'] = []
+
+# Initialize JD Generator
+if 'jd_generator' not in st.session_state:
+    st.session_state['jd_generator'] = JDGenerator()
+
+with st.expander('About this app'):
+    st.markdown('**What can this app do?**')
+    st.info('This app allows you to generate or upload a job description and process multiple resumes to extract key information and match candidates with the job requirements.')
+
+    st.markdown('**How to use the app?**')
+    st.warning('1. Generate or upload a job description\n2. Verify and edit the job description\n3. Upload one or more resume PDFs\n4. View the extracted information and job matches')
+
+# Sidebar for job description input
+with st.sidebar:
+    st.header('1. Job Description')
+    
+    # Job description input options
+    input_method = st.radio("Choose input method:", ["Text Input", "JSON Upload", "Generate JD"])
+    
+    if input_method == "Text Input":
+        job_description = st.text_area("Enter job description:", height=200)
+        if job_description:
+            st.session_state['job_description'] = job_description
+            st.session_state['generated_jd'] = None
+            st.session_state['jd_output'] = None
+    
+    elif input_method == "JSON Upload":
+        job_json = st.file_uploader("Upload job description JSON", type=['json'])
+        if job_json:
+            try:
+                job_description = json.load(job_json)
+                st.session_state['job_description'] = job_description
+                st.session_state['generated_jd'] = None
+                st.session_state['jd_output'] = None
+                st.success("Job description JSON loaded successfully!")
+            except Exception as e:
+                st.error(f"Error loading JSON: {e}")
+    
+    else:  # Generate JD
+        st.subheader("Generate Job Description")
+        
+        # Basic Information
+        role = st.text_input("Enter the job role/title:")
+        experience = st.number_input("Years of experience required:", min_value=0, max_value=30, value=3)
+        skills = st.text_area("Enter required skills (one per line):", height=100)
+        
+        # Additional Information
+        with st.expander("Additional Information (Optional)"):
+            location = st.text_input("Location:")
+            company_type = st.selectbox("Company Type:", 
+                ["", "Startup", "Enterprise", "Government", "Non-Profit", "Other"])
+            industry = st.text_input("Industry:")
+            salary_range = st.text_input("Salary Range:")
+            additional_requirements = st.text_area("Additional Requirements:", height=100)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Generate JD", type="primary"):
+                if role and skills:
+                    # Create JDInput object
+                    jd_input = JDInput(
+                        role=role,
+                        experience_years=experience,
+                        required_skills=[skill.strip() for skill in skills.split('\n') if skill.strip()],
+                        location=location if location else None,
+                        company_type=company_type if company_type else None,
+                        industry=industry if industry else None,
+                        salary_range=salary_range if salary_range else None,
+                        additional_requirements=additional_requirements if additional_requirements else None
+                    )
+                    
+                    try:
+                        # Generate JD
+                        jd_output = st.session_state['jd_generator'].generate_jd(jd_input)
+                        st.session_state['jd_output'] = jd_output
+                        
+                        # Format for display
+                        formatted_jd = st.session_state['jd_generator'].format_jd_for_display(jd_output)
+                        st.session_state['generated_jd'] = formatted_jd
+                        st.session_state['job_description'] = formatted_jd
+                        
+                        st.success("Job description generated successfully!")
+                    except Exception as e:
+                        st.error(f"Error generating JD: {e}")
+                else:
+                    st.warning("Please provide both role and skills to generate JD")
+        
+        with col2:
+            if st.button("Clear Generated JD"):
+                st.session_state['generated_jd'] = None
+                st.session_state['job_description'] = None
+                st.session_state['jd_output'] = None
+
+    st.header('2. Resume Upload')
+    uploaded_files = st.file_uploader("Upload resume PDFs", type=["pdf"], accept_multiple_files=True)
+    
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
+            if uploaded_file not in st.session_state['resumes']:
+                file_path = save_uploaded_file(uploaded_file, "dataset")
+                if file_path:
+                    st.session_state['resumes'].append(uploaded_file)
+                    st.success(f"Resume saved: {uploaded_file.name}")
+                else:
+                    st.error(f"Failed to save: {uploaded_file.name}")
+
+# Main content area
+if st.session_state['job_description']:
+    st.header('Job Description')
+    
+    # If there's a generated JD, show it in an editable text area
+    if st.session_state['generated_jd']:
+        st.info("Review and edit the generated job description:")
+        edited_jd = st.text_area("Edit job description:", value=st.session_state['generated_jd'], height=400)
+        if edited_jd != st.session_state['generated_jd']:
+            st.session_state['job_description'] = edited_jd
+            st.session_state['generated_jd'] = edited_jd
+    else:
+        # Display regular job description
+        if isinstance(st.session_state['job_description'], dict):
+            st.json(st.session_state['job_description'])
+        else:
+            st.write(st.session_state['job_description'])
+
+if st.session_state['resumes']:
+    st.header('Uploaded Resumes')
+    for resume in st.session_state['resumes']:
+        st.write(f"- {resume.name}")
+
+    if st.button("Process Resumes"):
+        with st.spinner("Processing resumes..."):
+            for resume in st.session_state['resumes']:
+                file_path = save_uploaded_file(resume, "dataset")
+                if file_path:
+                    # Process each resume
+                    documents = load_pdfs_from_file(file_path)
+                    if documents:
+                        # Extract key information using the LLM
+                        chain = initialize_model(documents)
+                        agent = ConversationalAgent(chain)
+                        
+                        # Extract key information
+                        queries = [
+                            "Extract the candidate's name, contact information, and email",
+                            "List all skills mentioned in the resume",
+                            "Extract work experience details including company names and durations",
+                            "List educational qualifications"
+                        ]
+                        
+                        resume_info = {}
+                        for query in queries:
+                            response, _ = agent.ask(query)
+                            resume_info[query] = response
+                        
+                        st.session_state['parsed_resumes'].append({
+                            'filename': resume.name,
+                            'info': resume_info
+                        })
+
+# Display parsed resume information
+if st.session_state['parsed_resumes']:
+    st.header('Parsed Resume Information')
+    for parsed_resume in st.session_state['parsed_resumes']:
+        with st.expander(f"Resume: {parsed_resume['filename']}"):
+            for query, response in parsed_resume['info'].items():
+                st.subheader(query)
+                st.write(response)
+
+# Cleanup function
+def cleanup_temp_files():
+    """Clean up temporary files when the session ends"""
+    try:
+        if os.path.exists("dataset"):
+            shutil.rmtree("dataset")
+    except Exception as e:
+        st.error(f"Error during cleanup: {e}")
+
+# Register cleanup function
+atexit.register(cleanup_temp_files)
 
 uploaded_file=None
 uploaded_video_file=None
